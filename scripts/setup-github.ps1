@@ -1,12 +1,20 @@
 # Configura environments, branch protection, rulesets y seguridad nativa.
 # Uso: .\scripts\setup-github.ps1 [-Repo owner/name]
 # Requiere: gh autenticado con scope repo
+#
+# Variables opcionales:
+#   $env:QA_LEAD, $env:TECH_LEAD, $env:SECURITY_LEAD  (logins de GitHub)
 
 param(
   [string]$Repo = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+function Write-JsonFile([string]$Path, $Object) {
+  $json = $Object | ConvertTo-Json -Depth 12 -Compress
+  [System.IO.File]::WriteAllText($Path, $json, [System.Text.UTF8Encoding]::new($false))
+}
 
 if (-not $Repo) {
   $Repo = gh repo view --json nameWithOwner -q .nameWithOwner
@@ -18,7 +26,8 @@ Write-Host "==> Repositorio: $Repo"
 # --- Environments -----------------------------------------------------------
 Write-Host "==> Creando environments..."
 
-$bodyDev = @{
+$tmp = Join-Path $env:TEMP "env-dev.json"
+Write-JsonFile $tmp (@{
   wait_timer = 0
   prevent_self_review = $false
   reviewers = @()
@@ -26,30 +35,24 @@ $bodyDev = @{
     protected_branches = $false
     custom_branch_policies = $true
   }
-} | ConvertTo-Json -Depth 5
-
-$tmp = New-TemporaryFile
-Set-Content -Path $tmp -Value $bodyDev -Encoding utf8
-gh api --method PUT "repos/$Repo/environments/development" --input $tmp
-Remove-Item $tmp
-gh api --method POST "repos/$Repo/environments/development/deployment-branch-policies" -f name=develop -F type=branch 2>$null
+})
+gh api --method PUT "repos/$Repo/environments/development" --input $tmp | Out-Null
+gh api --method POST "repos/$Repo/environments/development/deployment-branch-policies" -f name=develop -F type=branch 2>$null | Out-Null
 
 $QaLead = if ($env:QA_LEAD) { $env:QA_LEAD } else { $Owner }
-$QaId = gh api "users/$QaLead" --jq .id
-$bodyCert = @{
+$QaId = [int](gh api "users/$QaLead" --jq .id)
+$tmp = Join-Path $env:TEMP "env-cert.json"
+Write-JsonFile $tmp (@{
   wait_timer = 0
   prevent_self_review = $true
-  reviewers = @(@{ type = "User"; id = [int]$QaId })
+  reviewers = @(@{ type = "User"; id = $QaId })
   deployment_branch_policy = @{
     protected_branches = $false
     custom_branch_policies = $true
   }
-} | ConvertTo-Json -Depth 5
-$tmp = New-TemporaryFile
-Set-Content -Path $tmp -Value $bodyCert -Encoding utf8
-gh api --method PUT "repos/$Repo/environments/certification" --input $tmp
-Remove-Item $tmp
-gh api --method POST "repos/$Repo/environments/certification/deployment-branch-policies" -f name=staging -F type=branch 2>$null
+})
+gh api --method PUT "repos/$Repo/environments/certification" --input $tmp | Out-Null
+gh api --method POST "repos/$Repo/environments/certification/deployment-branch-policies" -f name=staging -F type=branch 2>$null | Out-Null
 
 $TechLead = if ($env:TECH_LEAD) { $env:TECH_LEAD } else { $Owner }
 $SecLead = if ($env:SECURITY_LEAD) { $env:SECURITY_LEAD } else { $Owner }
@@ -66,7 +69,8 @@ if ($TechId -eq $SecId) {
   )
 }
 
-$bodyProd = @{
+$tmp = Join-Path $env:TEMP "env-prod.json"
+Write-JsonFile $tmp (@{
   wait_timer = 10
   prevent_self_review = $true
   reviewers = $reviewers
@@ -74,12 +78,9 @@ $bodyProd = @{
     protected_branches = $false
     custom_branch_policies = $true
   }
-} | ConvertTo-Json -Depth 5
-$tmp = New-TemporaryFile
-Set-Content -Path $tmp -Value $bodyProd -Encoding utf8
-gh api --method PUT "repos/$Repo/environments/production" --input $tmp
-Remove-Item $tmp
-gh api --method POST "repos/$Repo/environments/production/deployment-branch-policies" -f name=main -F type=branch 2>$null
+})
+gh api --method PUT "repos/$Repo/environments/production" --input $tmp | Out-Null
+gh api --method POST "repos/$Repo/environments/production/deployment-branch-policies" -f name=main -F type=branch 2>$null | Out-Null
 
 Write-Host "    OK environments"
 
@@ -88,10 +89,9 @@ Write-Host "==> Aplicando branch protection..."
 
 function Set-BranchProtection {
   param([string]$Branch, [hashtable]$Payload)
-  $tmp = New-TemporaryFile
-  ($Payload | ConvertTo-Json -Depth 8) | Set-Content -Path $tmp -Encoding utf8
-  gh api --method PUT "repos/$Repo/branches/$Branch/protection" --input $tmp
-  Remove-Item $tmp
+  $tmp = Join-Path $env:TEMP "bp-$Branch.json"
+  Write-JsonFile $tmp $Payload
+  gh api --method PUT "repos/$Repo/branches/$Branch/protection" --input $tmp | Out-Null
 }
 
 Set-BranchProtection -Branch develop -Payload @{
@@ -168,23 +168,22 @@ Write-Host "==> Activando seguridad nativa..."
 try { gh api --method PUT "repos/$Repo/vulnerability-alerts" | Out-Null; Write-Host "    Dependabot alerts: ON" } catch { Write-Host "    Dependabot alerts: skip" }
 try { gh api --method PUT "repos/$Repo/automated-security-fixes" | Out-Null; Write-Host "    Dependabot security updates: ON" } catch { Write-Host "    Dependabot security updates: skip" }
 
-$secBody = @{
+$tmp = Join-Path $env:TEMP "sec.json"
+Write-JsonFile $tmp (@{
   security_and_analysis = @{
     secret_scanning = @{ status = "enabled" }
     secret_scanning_push_protection = @{ status = "enabled" }
     dependabot_security_updates = @{ status = "enabled" }
   }
-} | ConvertTo-Json -Depth 5
-$tmp = New-TemporaryFile
-Set-Content -Path $tmp -Value $secBody -Encoding utf8
-try { gh api --method PATCH "repos/$Repo" --input $tmp | Out-Null; Write-Host "    Secret scanning: solicitado" } catch { Write-Host "    Secret scanning: skip (plan/permisos)" }
-Remove-Item $tmp
+})
+try { gh api --method PATCH "repos/$Repo" --input $tmp | Out-Null; Write-Host "    Secret scanning: ON" } catch { Write-Host "    Secret scanning: skip" }
 
 # --- Ruleset ----------------------------------------------------------------
 Write-Host "==> Ruleset main..."
 $existing = gh api "repos/$Repo/rulesets" --jq '.[] | select(.name=="main-production-gates") | .id' 2>$null
 if (-not $existing) {
-  $ruleset = @{
+  $tmp = Join-Path $env:TEMP "ruleset.json"
+  Write-JsonFile $tmp (@{
     name = "main-production-gates"
     target = "branch"
     enforcement = "active"
@@ -222,11 +221,8 @@ if (-not $existing) {
       }
     )
     bypass_actors = @()
-  } | ConvertTo-Json -Depth 10
-  $tmp = New-TemporaryFile
-  Set-Content -Path $tmp -Value $ruleset -Encoding utf8
-  gh api --method POST "repos/$Repo/rulesets" --input $tmp
-  Remove-Item $tmp
+  })
+  gh api --method POST "repos/$Repo/rulesets" --input $tmp | Out-Null
   Write-Host "    Ruleset creado"
 } else {
   Write-Host "    Ruleset ya existe (id=$existing)"
@@ -236,3 +232,4 @@ Write-Host ""
 Write-Host "==> Setup completado para $Repo"
 Write-Host "Agrega secretos DEV_/CERT_/PROD_DEPLOY_TOKEN en cada environment."
 Write-Host "Actualiza CODEOWNERS y reviewers reales (QA/Tech/Seguridad)."
+Write-Host "En main: Restrict who can push → bot CI + admins (UI)."
