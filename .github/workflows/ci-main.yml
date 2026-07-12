@@ -57,7 +57,7 @@ jobs:
         run: npm audit --audit-level=moderate
       - name: Generar SBOM
         run: npx --yes @cyclonedx/cyclonedx-npm --output-file sbom.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom-main
           path: sbom.json
